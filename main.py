@@ -4,8 +4,6 @@ import re
 import sys
 import matplotlib.pyplot as plt
 
-
-label_dict = {0: "comp", 1: "load", 2:"store"}
 colordict = {
         0 : 'red',
         1 : 'darkgreen',
@@ -60,6 +58,21 @@ def count_mem(graph:nx.DiGraph, node_list):
     return len([node for node in node_list if graph.nodes[node]["op"] in ["LOAD", "STORE"]])
 
 
+def check(graph, clusters, cross_cluster_edges_cluster_index, n_total_pe, n_mem_pe):
+    # across-cluster acyclic check
+    if not no_cluster_cycle(cross_cluster_edges_cluster_index) :
+        return False
+    # in-cluster check
+    for i, cluster in enumerate(clusters) :
+        if len(cluster) > n_total_pe :
+            print(f"[Overflow Op] cluster {i} has {len(cluster)} operations")
+            return False
+        mem_in_cluster = count_mem(graph, cluster)
+        if mem_in_cluster > n_mem_pe :
+            print(f"[Overflow MEM Op] cluster {i} has {mem_in_cluster} memory operations")
+            return False
+    return True
+
 def get_cross_cluster_edges(clusters:list, graph:nx.DiGraph):
     node2cluster = {}
     for i, cluster in enumerate(clusters) :
@@ -74,6 +87,47 @@ def get_cross_cluster_edges(clusters:list, graph:nx.DiGraph):
             cross_cluster_edges_node_index.append((src, dest))
             cross_cluster_edges_cluster_index.append((node2cluster[src], node2cluster[dest]))
     return node2cluster, cross_cluster_edges_node_index, cross_cluster_edges_cluster_index
+
+def merge(graph:nx.DiGraph, clusters: list, n_total_pe:int, num_bank_ports:int, num_banks:int):
+    # merge的时候保证： 1. LD|ST + cross-cluster edges 少于8
+    # {WARNING} 如果选中的两个cluster有直接连接，或者公共parent，之前生成的 virtual nodes 并没有被删除
+    mem_loc = {}
+    tmp_clusters = []
+    i = 0
+    original_cluster = clusters.copy()
+    while i < 10:  # try 10 times with no change
+        i = i+1
+
+        # randomly merge two small clusters
+        small_clusters_index = [t for t in range(len(clusters)) if len(clusters[t]) <= (n_total_pe/2 - 4) ]  #
+        # random_indexes = np.random.randint(0, len(clusters), 2)
+        if len(small_clusters_index) < 2:
+            return {}, [], False
+        random_indexes = np.random.choice(small_clusters_index, size=2, replace=False)  # each time random two clusters and merge
+        tmp_clusters = []
+        for j, cluster in enumerate(clusters):
+            if j not in random_indexes:
+                tmp_clusters.append(cluster)
+        merged_cluster = []
+        for j in random_indexes:
+            merged_cluster = merged_cluster+clusters[j]
+        tmp_clusters.append(merged_cluster)
+
+        # check merged clusters satisfy all restrictions (ops, mem ops, circles, mem alloc)
+        tmp_node2cluster, _, tmp_cross_cluster_edges = get_cross_cluster_edges(tmp_clusters, graph)
+        if not check(graph, tmp_clusters, tmp_cross_cluster_edges, n_total_pe, num_bank_ports * num_banks) :
+            print(f"Failed to merge {clusters[random_indexes[0]]} and {clusters[random_indexes[1]]}")
+            continue
+        print(i)
+        tmp_mem_loc, feasible = memory_allocation(graph, tmp_clusters, tmp_node2cluster, num_banks, num_bank_ports)
+        if feasible:
+            print(f"Successfully merge {clusters[random_indexes[0]]} and {clusters[random_indexes[1]]}")
+            i = 0
+            clusters, mem_loc = tmp_clusters, tmp_mem_loc
+        else:
+            print(f"Failed to generated memory mapping once merge {clusters[random_indexes[0]]} and {clusters[random_indexes[1]]}")
+
+    return mem_loc, clusters, (original_cluster != clusters)
 
 
 def remove(graph:nx.DiGraph, node:str, node2cluster:dict, clusters:list):
@@ -322,31 +376,19 @@ def process(clusters:list, graph:nx.DiGraph, n_total_pe:int, num_bank:int, num_b
     print("\n\nCluster size after processing")
     print([len(cluster) for cluster in clusters])
 
-    # across-cluster acyclic check
-    if not no_cluster_cycle(cross_cluster_edges_cluster_index):
-        return {}, {}, False
 
-    # in-cluster check
-    for i, cluster in enumerate(clusters):
-        if len(cluster) > n_total_pe:
-            print(f"[Overflow Op] cluster {i} has {len(cluster)} operations")
-            return {}, {}, False
-        mem_in_cluster = count_mem(graph, cluster)
-        if mem_in_cluster > n_mem_pe:
-            print(f"[Overflow MEM Op] cluster {i} has {mem_in_cluster} memory operations")
-            return {}, {}, False
+    feasible = check(graph, clusters, cross_cluster_edges_cluster_index, n_total_pe, n_mem_pe)
+    if not feasible:
+        return {}, {}, [], False
 
     mem_loc, feasible = memory_allocation(graph, clusters, node2cluster.copy(), num_bank, num_bank_ports)
 
-    if feasible:
-        plot_cluster(cross_cluster_edges_cluster_index)
-
-    return node2cluster, mem_loc, feasible
+    return node2cluster, mem_loc, cross_cluster_edges_cluster_index, feasible
 
 
 def dfg_partition(graph:nx.DiGraph, num_cluster:int):
     # initial clustering
-    clusters = nx.community.greedy_modularity_communities(graph, cutoff=num_cluster)  #
+    clusters = nx.community.greedy_modularity_communities(graph, cutoff=num_cluster)
     return clusters
 
 def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:list, node2cluster:dict, mem_loc:dict, folder):
@@ -464,7 +506,7 @@ if __name__ == '__main__':
     memloc_file = "jpeg_fdct_islow_INNERMOST_LN1_mem_alloc.txt"
     ###### PE array configs #######
     n_total_pe = 16
-    num_cluster = 10  #  10
+    num_cluster = 18  #  10
     num_banks = 4
     num_bank_ports = 2
     bank_size = 1024
@@ -477,11 +519,21 @@ if __name__ == '__main__':
         clusters = [list(cluster) for cluster in clusters]
 
         # post-process
-        node2cluster, mem_loc, feasible = process(clusters, graph, n_total_pe, num_banks, num_bank_ports)
+        node2cluster, mem_loc, cross_cluster_edges_cluster_index, feasible = process(clusters, graph, n_total_pe, num_banks, num_bank_ports)
+        best_result = [clusters, node2cluster, mem_loc]
+        if feasible:
+            tmp_mem_loc, tmp_clusters, merged = merge(graph, clusters, n_total_pe, num_bank_ports, num_banks)
+            # update node2cluster
+            if merged:
+                print(f"Merged cluster, reduced to {len(tmp_clusters)} clusters")
+                mem_loc = tmp_mem_loc
+                clusters = tmp_clusters
+                node2cluster, cross_cluster_edges_node_index, cross_cluster_edges_cluster_index = get_cross_cluster_edges(clusters, graph)
+            plot_cluster(cross_cluster_edges_cluster_index)
 
         num_cluster = num_cluster + 1
 
-    if len(clusters)>25:
+    if len(clusters)>=25:
         sys.exit()
 
     labels = []

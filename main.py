@@ -2,6 +2,7 @@ from itertools import chain
 from panorama import *
 import re
 import sys
+import matplotlib.pyplot as plt
 
 
 label_dict = {0: "comp", 1: "load", 2:"store"}
@@ -288,6 +289,18 @@ def no_cluster_cycle(cross_cluster_edges:list):
         return False
     return True
 
+def plot_cluster(cross_cluster_edges:list):
+    cluster_graph = nx.DiGraph(cross_cluster_edges)
+    labels = [node for node in cluster_graph.nodes]
+    colors = [colordict[i] for i in labels]
+    # plot_dfg(cluster_graph, colors, cluster_graph.nodes, "cluster")
+    node_pos = nx.nx_agraph.graphviz_layout(cluster_graph, prog="dot", root=0)
+    nx.draw_networkx(cluster_graph, with_labels=True, pos=node_pos) #node_color = colors,
+    plt.savefig("cluster.png", format="PNG")
+    with open("cluster_connection.txt", 'w') as f:
+        f.write(f"src\tdest\n")
+        for src, dest in cluster_graph.edges:
+            f.write(f"{src}\t{dest}\n")
 
 def process(clusters:list, graph:nx.DiGraph, n_total_pe:int, num_bank:int, num_bank_ports:int):
     n_mem_pe = num_banks * num_bank_ports
@@ -324,6 +337,9 @@ def process(clusters:list, graph:nx.DiGraph, n_total_pe:int, num_bank:int, num_b
             return {}, {}, False
 
     mem_loc, feasible = memory_allocation(graph, clusters, node2cluster.copy(), num_bank, num_bank_ports)
+
+    if feasible:
+        plot_cluster(cross_cluster_edges_cluster_index)
 
     return node2cluster, mem_loc, feasible
 
@@ -465,7 +481,7 @@ if __name__ == '__main__':
 
         num_cluster = num_cluster + 1
 
-    if len(clusters)>24:
+    if len(clusters)>25:
         sys.exit()
 
     labels = []

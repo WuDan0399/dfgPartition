@@ -3,6 +3,7 @@ from panorama import *
 import re
 import sys
 import matplotlib.pyplot as plt
+from functools import reduce
 
 colordict = {
         0 : 'red',
@@ -43,7 +44,7 @@ colordict = {
         35 : 'yellow'
     }
 
-def same_dict(a:dict, b:dict):
+def same_dict(a:dict, b:dict): # same dict or one containing the other
     if len(a) == 0 or len(b) == 0:
         return False
     for k in a:
@@ -88,6 +89,31 @@ def get_cross_cluster_edges(clusters:list, graph:nx.DiGraph):
             cross_cluster_edges_cluster_index.append((node2cluster[src], node2cluster[dest]))
     return node2cluster, cross_cluster_edges_node_index, cross_cluster_edges_cluster_index
 
+
+def add_select(private_graph:nx.DiGraph, private_clusters:list):
+    select_counter = 1
+    clusters_copy = private_clusters.copy()
+    for i, cluster in enumerate(clusters_copy):  # clusters will change inside the loop
+        # is_select_node = [graph.nodes[node]["OP"] == "SELECT" for node in cluster]
+        # has_select_node = reduce(np.logical_or, is_select_node)
+        sidx = 0  # index of the select node in that cluster
+        while sidx < len(cluster):
+            if private_graph.nodes[cluster[sidx]]["op"] == "SELECT":
+                select_node = cluster[sidx]
+                break
+            sidx = sidx + 1
+        if sidx == len(cluster):
+            select_node = f"VR_SELECT_{select_counter}"
+            private_clusters[i].append(select_node)
+            private_graph.add_node(select_node, op="SELECT")
+            select_counter = select_counter + 1
+        # Connect select to all virtual node in that cluster
+        for node in cluster:
+            if node[:2] == "VR" and node != select_node:
+                private_graph.add_edge(select_node,  node)
+    return private_graph, private_clusters
+
+
 def merge(graph:nx.DiGraph, clusters: list, n_total_pe:int, num_bank_ports:int, num_banks:int):
     # merge的时候保证： 1. LD|ST + cross-cluster edges 少于8
     # {WARNING} 如果选中的两个cluster有直接连接，或者公共parent，之前生成的 virtual nodes 并没有被删除
@@ -99,27 +125,29 @@ def merge(graph:nx.DiGraph, clusters: list, n_total_pe:int, num_bank_ports:int, 
         i = i+1
 
         # randomly merge two small clusters
-        small_clusters_index = [t for t in range(len(clusters)) if len(clusters[t]) <= (n_total_pe/2 - 4) ]  #
-        # random_indexes = np.random.randint(0, len(clusters), 2)
+        small_clusters_index = [t for t in range(len(clusters)) if len(clusters[t]) <= (n_total_pe/2 - 4) ]
         if len(small_clusters_index) < 2:
             return {}, [], False
         random_indexes = np.random.choice(small_clusters_index, size=2, replace=False)  # each time random two clusters and merge
-        tmp_clusters = []
-        for j, cluster in enumerate(clusters):
-            if j not in random_indexes:
-                tmp_clusters.append(cluster)
+        tmp_clusters = [clusters[j].copy() for j in range(len(clusters)) if j not in random_indexes]
+        # for j, cluster in enumerate(clusters):
+        #     if j not in random_indexes:
+        #         tmp_clusters.append(cluster)
         merged_cluster = []
         for j in random_indexes:
             merged_cluster = merged_cluster+clusters[j]
         tmp_clusters.append(merged_cluster)
 
+        # for tmp_clusters, add select_0 for each cluster, rename to tmp_graph
+        tmp_graph, tmp_clusters_wiz_select = add_select(graph.copy(), tmp_clusters.copy())
+        
         # check merged clusters satisfy all restrictions (ops, mem ops, circles, mem alloc)
-        tmp_node2cluster, _, tmp_cross_cluster_edges = get_cross_cluster_edges(tmp_clusters, graph)
-        if not check(graph, tmp_clusters, tmp_cross_cluster_edges, n_total_pe, num_bank_ports * num_banks) :
+        tmp_node2cluster, _, tmp_cross_cluster_edges = get_cross_cluster_edges(tmp_clusters_wiz_select, tmp_graph)
+        if not check(tmp_graph, tmp_clusters_wiz_select, tmp_cross_cluster_edges, n_total_pe, num_bank_ports * num_banks) :
             print(f"Failed to merge {clusters[random_indexes[0]]} and {clusters[random_indexes[1]]}")
             continue
         print(i)
-        tmp_mem_loc, feasible = memory_allocation(graph, tmp_clusters, tmp_node2cluster, num_banks, num_bank_ports)
+        tmp_mem_loc, feasible = memory_allocation(tmp_graph, tmp_clusters_wiz_select, tmp_node2cluster, num_banks, num_bank_ports)
         if feasible:
             print(f"Successfully merge {clusters[random_indexes[0]]} and {clusters[random_indexes[1]]}")
             i = 0
@@ -343,6 +371,7 @@ def no_cluster_cycle(cross_cluster_edges:list):
         return False
     return True
 
+
 def plot_cluster(cross_cluster_edges:list):
     cluster_graph = nx.DiGraph(cross_cluster_edges)
     labels = [node for node in cluster_graph.nodes]
@@ -355,6 +384,7 @@ def plot_cluster(cross_cluster_edges:list):
         f.write(f"src\tdest\n")
         for src, dest in cluster_graph.edges:
             f.write(f"{src}\t{dest}\n")
+
 
 def process(clusters:list, graph:nx.DiGraph, n_total_pe:int, num_bank:int, num_bank_ports:int):
     n_mem_pe = num_banks * num_bank_ports
@@ -391,7 +421,61 @@ def dfg_partition(graph:nx.DiGraph, num_cluster:int):
     clusters = nx.community.greedy_modularity_communities(graph, cutoff=num_cluster)
     return clusters
 
+
+def get_ASAP_ALAP(graph:nx.DiGraph, clusters:list):
+    node_asap_alap = [{} for _ in range(len(clusters))]
+    for cid, cluster in enumerate(clusters):
+        subgraph = graph.subgraph(cluster)
+        node_asap, node_alap, asap_level, alap_level = {}, {}, [], []
+        for node in subgraph.nodes :
+            if len(subgraph.in_edges(node)) == 0 :
+                asap_level.append(node)
+            if len(subgraph.out_edges(node)) == 0 :
+                alap_level.append(node)
+
+        i = 0
+        level = []
+        while len(asap_level) > 0 :
+            level.clear()
+            for node_id in asap_level :
+                node_asap[node_id] = i
+                successors = [dest for _, dest in subgraph.out_edges(node_id)]
+                level = level + successors
+            asap_level = level.copy()
+            i = i + 1
+        maxasaplevel = i - 1
+
+        i = maxasaplevel
+        level = []
+        while len(alap_level) > 0 :
+            level.clear()
+            for node_id in alap_level :
+                node_alap[node_id] = i
+                predecessors = [src for src, _ in subgraph.in_edges(node_id)]
+                level = level + predecessors
+            alap_level = level.copy()
+            i = i - 1
+
+        for node_id in node_asap :
+            node_asap_alap[cid][node_id] = [node_asap[node_id], node_alap[node_id]]  # node_id:[ASAP, ALAP]
+
+    return node_asap_alap
+
+
+def update_asap_alap(line:str, asap_alap:list):
+    params = line.split()
+    for i in range(len(params)) :
+        if params[i][:4] == "ASAP" :
+            params[i] = params[i][:6] + str(asap_alap[0]) + '"'
+        if params[i][:4] == "ALAP" :
+            params[i] = params[i][:6] + str(asap_alap[1]) + '"'
+    mod_line = ' '.join(params) + '\n'
+    return mod_line
+
+
+
 def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:list, node2cluster:dict, mem_loc:dict, folder):
+    asap_alap = get_ASAP_ALAP(graph, clusters)  #  list of dict. cluster_index -> node_id: [ASAP, ALAP]
     mem_loc_file = open(os.path.join(folder, "memPE_alloc.txt"), 'w')
     mem_loc_file.write("node_id\tport_id\tcontent\n")
     original_file = open(dfg_filename, 'r')
@@ -410,9 +494,9 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
             node_id = re.findall("[0-9]+",line.strip().split()[1])[0]
             cluster_id = node2cluster[node_id]
             if graph.nodes[node_id]["op"] in ["LOAD", "STORE"]:
-                # line_with_mem_port = line[:-2] + f' PORT="{list(mem_loc[node_id])[0]}">\n'
-                # line_with_mem_port = line[:-2]
-                out_files[cluster_id].write(line)
+                line_updated_asap_alap = update_asap_alap(line, asap_alap[cluster_id][node_id])
+                out_files[cluster_id].write(line_updated_asap_alap)
+                # out_files[cluster_id].write(line)
                 bank_id = graph.nodes[node_id]["bank"]
                 mem_loc_file.write(f"{node_id}\t{list(mem_loc[node_id])[0]}\tcontent in bank{bank_id}\n")
             else:
@@ -446,13 +530,12 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
         if node[:2] == "VR":
             cluster_id = node2cluster[node]
             # node id
-            fake_ASAP = len(clusters[cluster_id])
             if graph.nodes[node]["op"] in ["LOAD", "STORE"]:
                 out_files[node2cluster[node]].write(
-                    f'<Node idx="{node}" ASAP="{fake_ASAP}" ALAP="{fake_ASAP}" BB="fake" CONST="1">\n')
+                    f'<Node idx="{node}" ASAP="{asap_alap[cluster_id][node][0]}" ALAP="{asap_alap[cluster_id][node][1]}" BB="fake" CONST="1">\n')
             else:
                 out_files[node2cluster[node]].write(
-                    f'<Node idx="{node}" ASAP="{fake_ASAP}" ALAP="{fake_ASAP}" BB="fake" CONST="1">\n')
+                    f'<Node idx="{node}" ASAP="{asap_alap[cluster_id][node][0]}" ALAP="{asap_alap[cluster_id][node][1]}" BB="fake" CONST="1">\n')
             # operation info
             out_files[node2cluster[node]].write(
                 f'<OP>{graph.nodes[node]["op"]}</OP>\n')
@@ -461,9 +544,10 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
                 # store the intermediate value, use the parent id (real) or parent's former node as input
                 former_node = "null"
                 in_edges = graph.in_edges(node)
-                srcs = [x for x, y in in_edges]
+                srcs = [x for x, y in in_edges if graph.nodes[x]["op"] != "SELECT"]
                 if len(srcs) != 1 :
                     print("[ERROR] A virtual store has more than one parent node.")
+                    print(srcs)
                 src = srcs[0]
                 if src[:2] == "VR":
                     if src not in virtual_BasePointerName:
@@ -528,13 +612,16 @@ if __name__ == '__main__':
                 print(f"Merged cluster, reduced to {len(tmp_clusters)} clusters")
                 mem_loc = tmp_mem_loc
                 clusters = tmp_clusters
-                node2cluster, cross_cluster_edges_node_index, cross_cluster_edges_cluster_index = get_cross_cluster_edges(clusters, graph)
+
+            graph, clusters = add_select(graph, clusters)
+            node2cluster, _, cross_cluster_edges_cluster_index = get_cross_cluster_edges(clusters, graph)
+
             plot_cluster(cross_cluster_edges_cluster_index)
 
         num_cluster = num_cluster + 1
 
-    if len(clusters)>=25:
-        sys.exit()
+    # if len(clusters)>25:
+    #     sys.exit()
 
     labels = []
     node_color = []
@@ -562,5 +649,7 @@ if __name__ == '__main__':
     os.mkdir(folder)
     print(f"\nOutput to {folder}")
 
-    os.rename(f"partition_{len(clusters)}.png", os.path.join(folder, f"partition_{len(clusters)}.png"))
+    os.rename(f"partition_{len(clusters)}.pdf", os.path.join(folder, f"partition_{len(clusters)}.pdf"))
+    os.rename(f"cluster_connection.txt", os.path.join(folder, f"cluster_connection.txt"))
+    os.rename(f"cluster.png", os.path.join(folder, f"cluster.png"))
     dump_to_xml("partitioned_DFG", dfg_filename, graph, clusters, node2cluster, mem_loc, folder)

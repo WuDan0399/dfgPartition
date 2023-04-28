@@ -91,7 +91,8 @@ def plot_dfg(DFG:nx.DiGraph, colors, labels, filename):
     for edges in DFG.edges :
         pydot_dfg.add_edge(pydot.Edge(edges[0], edges[1]))
 
-    pydot_dfg.write_png(filename+".png")
+    # pydot_dfg.write_png(filename+".png")
+    pydot_dfg.write_pdf(filename + ".pdf")
 
 
 def my_mkdir(dir) :

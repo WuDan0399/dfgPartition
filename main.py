@@ -500,7 +500,8 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
                 bank_id = graph.nodes[node_id]["bank"]
                 mem_loc_file.write(f"{node_id}\t{list(mem_loc[node_id])[0]}\tcontent in bank{bank_id}\n")
             else:
-                out_files[cluster_id].write(line)
+                line_updated_asap_alap = update_asap_alap(line, asap_alap[cluster_id][node_id])
+                out_files[cluster_id].write(line_updated_asap_alap)
 
             it_line = it_line + 1
         elif line[:9] == '\t<Output ':

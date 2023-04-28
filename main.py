@@ -121,11 +121,11 @@ def merge(graph:nx.DiGraph, clusters: list, n_total_pe:int, num_bank_ports:int, 
     tmp_clusters = []
     i = 0
     original_cluster = clusters.copy()
-    while i < 10:  # try 10 times with no change
+    while i < 20:  # try 10 times with no change
         i = i+1
 
         # randomly merge two small clusters
-        small_clusters_index = [t for t in range(len(clusters)) if len(clusters[t]) <= (n_total_pe/2 - 4) ]
+        small_clusters_index = [t for t in range(len(clusters)) if len(clusters[t]) <= (n_total_pe/2 - 2) ]
         if len(small_clusters_index) < 2:
             return {}, [], False
         random_indexes = np.random.choice(small_clusters_index, size=2, replace=False)  # each time random two clusters and merge

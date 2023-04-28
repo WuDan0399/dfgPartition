@@ -484,12 +484,17 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
     out_files = {}
     for cluster_id in range(len(clusters)):
         out_files[cluster_id] = open(os.path.join(folder, out_prefix+f"_{cluster_id}.xml"), 'w')
+        out_files[cluster_id].write("<MutexBB>\n</MutexBB>\n<ITER stride=\"1\" max_count=\"8\">\n");
+        out_files[cluster_id].write("<DFG count=\""+str(len(clusters[cluster_id]))+"\">\n");
+
     it_line = 0
     node_id = -1
     cluster_id = -1
     # DFG nodes in original xml
+    
     while it_line < len(lines):
         line = lines[it_line]
+                
         if line[:5] == "<Node":
             node_id = re.findall("[0-9]+",line.strip().split()[1])[0]
             cluster_id = node2cluster[node_id]
@@ -582,6 +587,9 @@ def dump_to_xml(out_prefix:str, dfg_filename:str, graph:nx.DiGraph, clusters:lis
             out_files[node2cluster[node]].write(
                 f'<RecParents>\n</RecParents>\n</Node>\n\n')
 
+    for cluster_id in range(len(clusters)):
+        out_files[cluster_id].write("</DFG>\n");
+
     for _, file in out_files.items():
         file.close()   # Good habit of closing the file ;)
 
@@ -622,7 +630,7 @@ if __name__ == '__main__':
             print("\n\nCluster size after merging small clusters and add select nodes")
             print([len(cluster) for cluster in clusters])
 
-            plot_cluster(cross_cluster_edges_cluster_index)
+            #plot_cluster(cross_cluster_edges_cluster_index)
 
         num_cluster = num_cluster + 1
 

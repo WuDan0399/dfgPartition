@@ -401,9 +401,9 @@ def process(clusters:list, graph:nx.DiGraph, n_total_pe:int, num_bank:int, num_b
     # augment graph with LD|ST insertion
     augment(cross_cluster_edges_node_index, node2cluster, clusters, graph)
 
-    print("\n\nClustering result after processing")
+    print("\n\nClustering result after adding virtual load and stores")
     print(clusters)
-    print("\n\nCluster size after processing")
+    print("\n\nCluster size after adding virtual load and stores")
     print([len(cluster) for cluster in clusters])
 
 
@@ -615,6 +615,11 @@ if __name__ == '__main__':
 
             graph, clusters = add_select(graph, clusters)
             node2cluster, _, cross_cluster_edges_cluster_index = get_cross_cluster_edges(clusters, graph)
+
+            print("\n\nClustering result after merging small clusters and add select nodes")
+            print(clusters)
+            print("\n\nCluster size after merging small clusters and add select nodes")
+            print([len(cluster) for cluster in clusters])
 
             plot_cluster(cross_cluster_edges_cluster_index)
 
